@@ -1,0 +1,128 @@
+#!/bin/bash
+
+# back2paper - защищённое хранение файла на бумаге.
+# v0.0.4 (17 февраля 2014 г.)
+# Распространяется на условиях лицензии GNU GPL v3.0
+# Автор: Д. А. Куценко
+# github.com/dakutsenko
+
+# Для работы требуются следующие пакеты:
+#     coreutils, bash, gnupg, secure-delete, sed, paps, ghostscript, pdftk
+# Использует шрифт OCRB.otf: http://www.fontpalace.com/font-download/OCRB+OTF/
+
+#TODO Добавить поддержку обработки нескольких файлов
+#TODO Добавить генерацию даты в начале скрипта
+#TODO Добавить возможность создания генератора незашифрованного файла
+#TODO Сделать контрольную сумму по SHA-1 опциональной
+#TODO Добавить информацию для восстановления от ошибок в наборе Base64-кода
+#TODO Добавить контрольные суммы к каждой строке Base64-кода
+#TODO Включить номера строк в Base64-код (при декодировании должны удаляться)
+#TODO Создавать все временные файлы в директории tmp
+#TODO Добавить поддержку Nautilus
+
+# Проверить наличие параметра с именем файла
+if [ -z "$1" ]
+then
+	echo "ИСПОЛЬЗОВАНИЕ: $0 filename" >&2
+	exit 1
+fi
+
+# Функция, печатающая SH-сценарий генератора в стандартный вывод
+function generate {
+	# Требуется имя файла в параметре 1
+	# Проверить возможность считывания указанного файла
+	if [ ! -r "$1" ]
+	then
+		echo "ОШИБКА: файл $1 не доступен!" >&2
+		exit 2
+	fi
+
+	filename=$1
+
+	# Зашифровать файл с помощью алгоритма AES-256
+	gpg -c -q --cipher-algo AES256 $filename > /dev/null
+
+	echo "#!/bin/sh"
+	echo
+	echo "# Type this file using your favourite text editor"
+	echo "# and save it as gen_${filename}.sh."
+	echo "# You may save some time by skipping comments"
+	echo "# (lines started with # symbol) and blank lines."
+	echo "# Then execute the file by typing following command in your terminal:"
+	echo "#     sh gen_${filename}.sh"
+	echo "# and type your password to get ${filename} in current directory."
+	echo "# The following packages must be already installed:"
+	echo "#     gnupg, coreutils"
+	echo "# File ${filename} is encrypted using SHA-256 algorithm."
+	echo "# The result then encoded in Base64 format using only the following"
+	echo "# 65 ASCII characters:"
+	echo "#     A B C D E F G H I J K L M N O P Q R S T U V W X Y Z"
+	echo "#     a b c d e f g h i j k l m n o p q r s t u v w x y z"
+	echo "#     0 1 2 3 4 5 6 7 8 9 + / ="
+	echo "# SHA-1 checksum is used to verify your typing."
+	echo
+	echo "# Create ${filename}.gpg"
+	echo "base64 -di <<BASE64ENCODING > ${filename}.gpg"
+	echo
+
+	# Вывести Base64-представление зашифрованного файла,
+	# разделённое на блоки 8x8 символов по 8 блоков в строку
+	# для упрощения набора с клавиатуры
+	base64 -w64 ${filename}.gpg | sed 's/.\{8\}/& /g' | \
+		awk '1; NR % 8 == 0 {print ""}'
+
+	echo
+	echo "BASE64ENCODING"
+	echo
+	echo "# Verify created file"
+	echo "sha1sum --status -c <<SHA1CHECKSUM"
+	echo
+
+	# Вывести контрольную сумму по алгоритму SHA-1
+	sha1sum -b ${filename}.gpg
+	# Удалить зашифрованный файл
+	rm -f ${filename}.gpg > /dev/null
+	# Надёжно удалить исходный незашифрованный файл
+	# srm -f $filename > /dev/null
+	
+	echo
+	echo "SHA1CHECKSUM"
+	echo 'if [ "${?}" -ne "0" ]'
+	echo "then"
+	echo '	echo "Sorry, the file is corrupted. Check your typing!" >&2'
+	echo "	exit 1"
+	echo "fi"
+	echo
+	echo "# Decrypt ${filename}"
+	echo "gpg -q ${filename}.gpg"
+	echo
+	echo "# Remove ${filename}.gpg"
+	echo "rm -f ${filename}.gpg"
+}
+
+filename=$1
+generator="gen_${filename}.sh"
+
+# Создать файл сценария генератора
+generate ${filename} > $generator
+# Сделать его исполняемым файлом
+chmod u+x $generator
+
+# Заменить все 0 на перечёркнутые O, символы табуляции на 4 пробела.
+# Вывести результат в PS-файл размера A4 ладшафтной ориентации, 
+# набранный шрифтом гарнитуры OCRB кегля 7pt в две колонки по 9 строк на дюйм
+sed -e 's/0/\xc3\x98/g' < "${generator}" | sed -e 's/\t/    /g' | \
+	paps --landscape --columns=2 --lpi=9 --font "OCRB 7" > "gen_${filename}.ps"
+
+# Преобразовать PS-файл в PDF-файл
+ps2pdf "gen_${filename}.ps" "gen_${filename}.pdf"
+
+# Удалить PS-файл
+rm -f "gen_${filename}.ps"
+
+# Прикрепить к копии PDF-файла файл-сценарий генератора
+pdftk "gen_${filename}.pdf" attach_files "${generator}" \
+	output "gen_${filename}.sh.pdf"
+
+# Удалить исходный PDF-файл
+rm -f "gen_${filename}.pdf"
